@@ -9,13 +9,13 @@ var dummySchema = {
     data: {},
     getExpectedType: function(className, key) {
       if (key == 'userPointer') {
-        return { type: 'Pointer', targetClass: '_User' };
+        return Promise.resolve({ type: 'Pointer', targetClass: '_User' });
       } else if (key == 'picture') {
-        return { type: 'File' };
+        return Promise.resolve({ type: 'File' });
       } else if (key == 'location') {
-        return { type: 'GeoPoint' };
+        return Promise.resolve({ type: 'GeoPoint' });
       }
-      return;
+      return Promise.resolve();
     },
     getRelationFields: function() {
       return {}

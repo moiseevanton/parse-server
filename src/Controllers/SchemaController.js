@@ -243,7 +243,6 @@ class SchemaController {
 
   reloadData() {
     this._schemaPromises = {};
-
     // Inject the in-memory classes
     volatileClasses.forEach(className => {
       this._schemaPromises[className] = Promise.resolve(injectDefaultSchema({
@@ -252,6 +251,7 @@ class SchemaController {
         classLevelPermissions: {}
       }));
     });
+    return Promise.resolve();
   }
 
   getAllSchemas() {
@@ -285,12 +285,15 @@ class SchemaController {
   // have authorization (master key, or client class creation
   // enabled) before calling this function.
   addClassIfNotExists(className, fields = {}, classLevelPermissions) {
-    var validationError = this.validateNewClass(className, fields, classLevelPermissions);
-    if (validationError) {
-      return Promise.reject(validationError);
+    if (!classNameIsValid(className)) {
+      throw new Parse.Error(Parse.Error.INVALID_CLASS_NAME, invalidClassNameMessage(className));
     }
-
-    return this._collection.addSchema(className, fields, classLevelPermissions)
+    let schemaDataError = this.validateSchemaData(className, fields, classLevelPermissions);
+    if (schemaDataError) {
+      throw new Parse.Error(validationError.code, validationError.error);
+    }
+    this._schemaPromises[className] = this._collection.addSchema(className, fields, classLevelPermissions);
+    return this._schemaPromises[className];
   }
 
   updateClass(className, submittedFields, classLevelPermissions, database) {
@@ -341,47 +344,29 @@ class SchemaController {
     });
   }
 
-  // Returns a promise that resolves successfully to the new schema
-  // object or fails with a reason.
-  // If 'freeze' is true, refuse to modify the schema.
-  enforceClassExists(className, freeze) {
-    if (this.data[className]) {
-      return Promise.resolve(this);
-    }
-    if (freeze) {
-      throw new Parse.Error(Parse.Error.INVALID_JSON,
-        'schema is frozen, cannot add: ' + className);
+  // Create a class and return it. If it already exists, return it.
+  enforceClassExists(className) {
+    if (this._schemaPromises[className]) {
+      return this._schemaPromises[className];
     }
     // We don't have this class. Update the schema
-    return this.addClassIfNotExists(className, []).then(() => {
-      // The schema update succeeded. Reload the schema
+    this._schemaPromises[className] = this.addClassIfNotExists(className, [])
+    .catch(error => {
+      if (error.code === Parse.Error.INVALID_CLASS_NAME) {
+        // INVALID_CLASS_NAME is the code used when a class already exists with this name =/ maybe we can change that,
+        // it's pretty silly. So we now need to check class if the rejection was due to invalid class and rethrow if so.
+        if (!classNameIsValid(className)) {
+          throw error;
+        } else {
+          // The class name was valid, but already existed. That means someone else created it in the meantime.
+          // Reload and fetch that schema.
+          return this.reloadData().then(() => this.getOneSchema(className));
+        }
+      } else {
+        throw error;
+      }
       return this.reloadData();
-    }, () => {
-      // The schema update failed. This can be okay - it might
-      // have failed because there's a race condition and a different
-      // client is making the exact same schema update that we want.
-      // So just reload the schema.
-      return this.reloadData();
-    }).then(() => {
-      // Ensure that the schema now validates
-      return this.enforceClassExists(className, true);
-    }, () => {
-      // The schema still doesn't validate. Give up
-      throw new Parse.Error(Parse.Error.INVALID_JSON, 'schema class name does not revalidate');
     });
-  }
-
-  validateNewClass(className, fields = {}, classLevelPermissions) {
-    if (this.data[className]) {
-      throw new Parse.Error(Parse.Error.INVALID_CLASS_NAME, `Class ${className} already exists.`);
-    }
-    if (!classNameIsValid(className)) {
-      return {
-        code: Parse.Error.INVALID_CLASS_NAME,
-        error: invalidClassNameMessage(className),
-      };
-    }
-    return this.validateSchemaData(className, fields, classLevelPermissions);
   }
 
   validateSchemaData(className, fields, classLevelPermissions) {
@@ -503,7 +488,7 @@ class SchemaController {
   // to remove unused fields, if other writers are writing objects that include
   // this field, the field may reappear. Returns a Promise that resolves with
   // no object on success, or rejects with { code, error } on failure.
-  // Passing the database and prefix is necessary in order to drop relation collections
+  // Passing the database is necessary in order to drop relation collections
   // and remove fields from objects. Ideally the database would belong to
   // a database adapter and this function would close over it or access it via member.
   deleteField(fieldName, className, database) {
@@ -518,24 +503,20 @@ class SchemaController {
       throw new Parse.Error(136, `field ${fieldName} cannot be changed`);
     }
 
-    return this.reloadData()
-    .then(() => this.hasClass(className))
-    .then(hasClass => {
-      if (!hasClass) {
-        throw new Parse.Error(Parse.Error.INVALID_CLASS_NAME, `Class ${className} does not exist.`);
-      }
-      if (!this.data[className][fieldName]) {
+    return this.getOneSchema(className)
+    .then(schema => {
+      if (!schema[fieldName]) {
         throw new Parse.Error(255, `Field ${fieldName} does not exist, cannot delete.`);
       }
 
-      if (this.data[className][fieldName].type == 'Relation') {
+      if (schema[fieldName].type === 'Relation') {
         //For relations, drop the _Join table
         return database.adapter.deleteFields(className, [fieldName], [])
         .then(() => database.adapter.deleteOneSchema(`_Join:${fieldName}:${className}`));
       }
 
       const fieldNames = [fieldName];
-      const pointerFieldNames = this.data[className][fieldName].type === 'Pointer' ? [fieldName] : [];
+      const pointerFieldNames = schema[fieldName].type === 'Pointer' ? [fieldName] : [];
       return database.adapter.deleteFields(className, fieldNames, pointerFieldNames);
     });
   }
@@ -643,12 +624,19 @@ class SchemaController {
   };
 
   // Returns the expected type for a className+key combination
-  // or undefined if the schema is not set
-  getExpectedType(className, key) {
-    if (this.data && this.data[className]) {
-      return this.data[className][key];
-    }
-    return undefined;
+  // or undefined if the schema is not set.
+  getExpectedType(className, fieldName) {
+    return this.getOneSchema(className)
+    .then(schema => schema[fieldName].type)
+    .catch(error => {
+      // Class not existing and class name being invalid both use INVALID_CLASS_NAME
+      // so we need to disambiguate
+      if (error.code === Parse.Error.INVALID_CLASS_NAME && classNameIsValid(className)) {
+        return Promise.resolve();
+      } else {
+        throw error;
+      }
+    });
   };
 
   // Checks if a given class is in the schema.
