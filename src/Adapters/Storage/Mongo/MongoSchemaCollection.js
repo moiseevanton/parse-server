@@ -1,5 +1,5 @@
-
 import MongoCollection from './MongoCollection';
+import Parse           from 'parse/node';
 import * as transform  from './MongoTransform';
 
 function mongoFieldToParseSchemaField(type) {
@@ -138,8 +138,10 @@ class MongoSchemaCollection {
       if (results.length === 1) {
         return mongoSchemaToParseSchema(results[0]);
       } else {
-        return Promise.reject();
+        throw new Parse.Error(Parse.Error.INVALID_CLASS_NAME, `Class ${className} does not exist.`);
       }
+    }, error => {
+      throw new Parse.Error(Parse.Error.INTERNAL_SERVER_ERROR, 'Database adapter error');
     });
   }
 
@@ -156,8 +158,9 @@ class MongoSchemaCollection {
 
   // Add a collection. Currently the input is in mongo format, but that will change to Parse format in a
   // later PR. Returns a promise that is expected to resolve with the newly created schema, in Parse format.
-  // If the class already exists, returns a promise that rejects with undefined as the reason. If the collection
-  // can't be added for a reason other than it already existing, requirements for rejection reason are TBD.
+  // If the class already exists, returns a promise that rejects with INVALID_CLASS_NAME and a descriptive message as the reason. If the collection
+  // can't be added for a reason other than it already existing, reject with INTERNAL_SERVER_ERROR
+  // and a message that doesn't leak info to the client unnecessarily.
   addSchema(name: string, fields, classLevelPermissions) {
     let mongoSchema = mongoSchemaFromFieldsAndClassNameAndCLP(fields, name, classLevelPermissions);
     let mongoObject = _mongoSchemaObjectFromNameFields(name, mongoSchema);
@@ -165,9 +168,9 @@ class MongoSchemaCollection {
     .then(result => mongoSchemaToParseSchema(result.ops[0]))
     .catch(error => {
       if (error.code === 11000) { //Mongo's duplicate key error
-        return Promise.reject();
+        throw new Parse.Error(Parse.Error.INVALID_CLASS_NAME, `Class ${className} already exists.`);
       }
-      return Promise.reject(error);
+      throw new Parse.Error(Parse.Error.INTERNAL_SERVER_ERROR, 'Database adapter error.');
     });
   }
 
@@ -202,12 +205,12 @@ class MongoSchemaCollection {
       }
       return Promise.resolve();
     }, error => {
-      // If error is undefined, the schema doesn't exist, and we can create the schema with the field.
+      // If error is INVALID_CLASS_NAME, the schema doesn't exist, and we can create the schema with the field.
       // If some other error, reject with it.
-      if (error === undefined) {
+      if (error.code == Parse.Error.INVALID_CLASS_NAME) {
         return Promise.resolve();
       }
-      throw Promise.reject(error);
+      throw error;
     })
     .then(() => {
       // We use $exists and $set to avoid overwriting the field type if it

@@ -1556,4 +1556,25 @@ describe('schemas', () => {
       done();
     })
   })
+
+  it("doesn't let you add garbage keys in a field", done => {
+    var obj = hasAllPODobject();
+    obj.save()
+    .then(() => {
+      request.put({
+        url: 'http://localhost:8378/1/schemas/HasAllPOD',
+        headers: masterKeyHeaders,
+        json: true,
+        body: {
+          fields: {
+            aString: {type: 'String', garbageKey: "garbage"}
+          }
+        }
+      }, (error, response, body) => {
+        expect(response.statusCode).toEqual(400);
+        expect(body.code).toEqual(Parse.Error.INCORRECT_TYPE);
+        done();
+      });
+    })
+  });
 });

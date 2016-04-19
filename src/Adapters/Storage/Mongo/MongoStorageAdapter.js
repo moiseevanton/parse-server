@@ -153,7 +153,9 @@ export class MongoStorageAdapter {
 
   // Return a promise for the schema with the given name, in Parse format. If
   // this adapter doesn't know about the schema, return a promise that rejects with
-  // undefined as the reason.
+  // a Parse.Error having INVALID_CLASSNAME as the code and a message saying the class doesn't exist
+  // If there is any other failure, the promise must reject with INTERNAL_SERVER_ERROR and a message
+  // that doesn't leak info that the client shouldn't see.
   getOneSchema(className) {
     return this.schemaCollection()
     .then(schemasCollection => schemasCollection._fechOneSchemaFrom_SCHEMA(className));

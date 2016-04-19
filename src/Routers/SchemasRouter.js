@@ -24,14 +24,7 @@ function getOneSchema(req) {
   const className = req.params.className;
   return req.config.database.loadSchema()
   .then(schemaController => schemaController.getOneSchema(className))
-  .then(schema => ({ response: schema }))
-  .catch(error => {
-    if (error === undefined) {
-      throw new Parse.Error(Parse.Error.INVALID_CLASS_NAME, `Class ${className} does not exist.`);
-    } else {
-      throw new Parse.Error(Parse.Error.INTERNAL_SERVER_ERROR, 'Database adapter error.');
-    }
-  });
+  .then(schema => ({ response: schema }));
 }
 
 function createSchema(req) {

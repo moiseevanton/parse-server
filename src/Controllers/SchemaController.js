@@ -195,7 +195,10 @@ const validNonRelationOrPointerTypes = [
   'File',
 ];
 // Returns an error suitable for throwing if the type is invalid
-const fieldTypeIsInvalid = ({ type, targetClass }) => {
+const fieldTypeIsInvalid = ({ type, targetClass, ...extraKeys }) => {
+  if (!_.isEmpty(extraKeys)) {
+    return new Parse.Error(Parse.Error.INCORRECT_TYPE, `Extra keys on field: ${Object.keys(extraKeys)}.`);
+  }
   if (['Pointer', 'Relation'].includes(type)) {
     if (!targetClass) {
       return new Parse.Error(135, `type ${type} needs a class name`);
@@ -226,56 +229,52 @@ const injectDefaultSchema = schema => ({
   classLevelPermissions: schema.classLevelPermissions,
 })
 
-// Stores the entire schema of the app in a weird hybrid format somewhere between
-// the mongo format and the Parse format. Soon, this will all be Parse format.
 class SchemaController {
   _collection;
   _dbAdapter;
-  data;
-  perms;
+  _schemaPromises;
 
   constructor(collection, databaseAdapter) {
     this._collection = collection;
     this._dbAdapter = databaseAdapter;
-
-    // this.data[className][fieldName] tells you the type of that field, in mongo format
-    this.data = {};
-    // this.perms[className][operation] tells you the acl-style permissions
-    this.perms = {};
+    // this._schemaPromsies[className] is a promise for the schema in Parse Format
+    this._schemaPromises = {}
   }
 
   reloadData() {
-    this.data = {};
-    this.perms = {};
-    return this.getAllSchemas()
-    .then(allSchemas => {
-      allSchemas.forEach(schema => {
-        this.data[schema.className] = schema.fields;
-        this.perms[schema.className] = schema.classLevelPermissions;
-      });
-      
-      // Inject the in-memory classes
-      volatileClasses.forEach(className => {
-        this.data[className] = injectDefaultSchema({
-          className,
-          fields: {},
-          classLevelPermissions: {}
-        });
-      });
+    this._schemaPromises = {};
+
+    // Inject the in-memory classes
+    volatileClasses.forEach(className => {
+      this._schemaPromises[className] = Promise.resolve(injectDefaultSchema({
+        className,
+        fields: {},
+        classLevelPermissions: {}
+      }));
     });
   }
 
   getAllSchemas() {
-    return this._dbAdapter.getAllSchemas()
+    let promise = this._dbAdapter.getAllSchemas()
     .then(allSchemas => allSchemas.map(injectDefaultSchema));
+    promise.then(allSchemas => {
+      allSchemas.forEach(schema => {
+        this._schemaPromises[schema.className] = Promise.as(schema);
+      });
+    })
+    return promise;
   }
 
-  getOneSchema(className, allowVolatileClasses = false) {
-    if (allowVolatileClasses && volatileClasses.indexOf(className) > -1) {
-      return Promise.resolve(this.data[className]);
+  getOneSchema(className) {
+    if (this._schemaPromises[className]) {
+      return this._schemaPromises[className];
     }
-    return this._dbAdapter.getOneSchema(className)
+    let promise = this._dbAdapter.getOneSchema(className)
     .then(injectDefaultSchema);
+    promise.then(schema => {
+      this._schemaPromises[className] = schema
+    });
+    return promise
   }
 
   // Create a new class that includes the three default fields.
@@ -292,33 +291,24 @@ class SchemaController {
     }
 
     return this._collection.addSchema(className, fields, classLevelPermissions)
-    .catch(error => {
-      if (error === undefined) {
-        throw new Parse.Error(Parse.Error.INVALID_CLASS_NAME, `Class ${className} already exists.`);
-      } else {
-        throw new Parse.Error(Parse.Error.INTERNAL_SERVER_ERROR, 'Database adapter error.');
-      }
-    });
   }
 
   updateClass(className, submittedFields, classLevelPermissions, database) {
-    return this.hasClass(className)
-    .then(hasClass => {
-      if (!hasClass) {
-        throw new Parse.Error(Parse.Error.INVALID_CLASS_NAME, `Class ${className} does not exist.`);
-      }
-      let existingFields = Object.assign(this.data[className], {_id: className});
-      Object.keys(submittedFields).forEach(name => {
-        let field = submittedFields[name];
-        if (existingFields[name] && field.__op !== 'Delete') {
-          throw new Parse.Error(255, `Field ${name} exists, cannot update.`);
+    return this.getOneSchema(className)
+    .then(schema => {
+      let existingFields = {...schema.fields};
+      let newSchema = {...schema.fields};
+      Object.keys(submittedFields).forEach(fieldName => {
+        let field = submittedFields[fieldName];
+        if (existingFields[fieldName] && field.__op !== 'Delete') {
+          throw new Parse.Error(255, `Field ${fieldName} exists, cannot update.`);
         }
-        if (!existingFields[name] && field.__op === 'Delete') {
-          throw new Parse.Error(255, `Field ${name} does not exist, cannot delete.`);
+        if (!existingFields[fieldName] && field.__op === 'Delete') {
+          throw new Parse.Error(255, `Field ${fieldName} does not exist, cannot delete.`);
         }
+        newSchema[fieldName] = field;
       });
 
-      let newSchema = buildMergedSchemaObject(existingFields, submittedFields);
       let validationError = this.validateSchemaData(className, newSchema, classLevelPermissions);
       if (validationError) {
         throw new Parse.Error(validationError.code, validationError.error);
@@ -346,25 +336,9 @@ class SchemaController {
         });
         return Promise.all(promises);
       })
-      .then(() => this.setPermissions(className, classLevelPermissions, newSchema))
-      //TODO: Move this logic into the database adapter
-      .then(() => ({
-        className: className,
-        fields: this.data[className],
-        classLevelPermissions: this.perms[className]
-      }));
-    })
-  }
-
-
-  // Returns whether the schema knows the type of all these keys.
-  hasKeys(className, keys) {
-    for (let key of keys) {
-      if (!this.data[className] || !this.data[className][key]) {
-        return false;
-      }
-    }
-    return true;
+      .then(() => this.setPermissions(className, classLevelPermissions))
+      .then(() => this.getOneSchema(className));
+    });
   }
 
   // Returns a promise that resolves successfully to the new schema
