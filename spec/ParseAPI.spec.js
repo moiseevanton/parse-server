@@ -225,6 +225,34 @@ describe('miscellaneous', function() {
     });
   });
 
+  it('test beforeSave set object acl success', function(done) {
+    var acl = new Parse.ACL({
+      '*': { read: true, write: false }
+    });
+    Parse.Cloud.beforeSave('BeforeSaveAddACL', function(req, res) {
+      req.object.setACL(acl);
+      res.success();
+    });
+
+    var obj = new Parse.Object('BeforeSaveAddACL');
+    obj.set('lol', true);
+    obj.save().then(function() {
+      Parse.Cloud._removeHook('Triggers', 'beforeSave', 'BeforeSaveAddACL');
+      var query = new Parse.Query('BeforeSaveAddACL');
+      query.get(obj.id).then(function(objAgain) {
+        expect(objAgain.get('lol')).toBeTruthy();
+        expect(objAgain.getACL().equals(acl));
+        done();
+      }, function(error) {
+        fail(error);
+        done();
+      });
+    }, function(error) {
+      fail(error);
+      done();
+    });
+  });
+
   it('test beforeSave returns value on create and update', (done) => {
     var obj = new Parse.Object('BeforeSaveChanged');
     obj.set('foo', 'bing');
@@ -1406,6 +1434,18 @@ describe('miscellaneous', function() {
       return Promise.reject();
     }, error => {
       expect(error.code === Parse.Error.DUPLICATE_VALUE);
+      done();
+    });
+  });
+
+  it('doesnt convert interior keys of objects that use special names', done => {
+    let obj = new Parse.Object('Obj');
+    obj.set('val', { createdAt: 'a', updatedAt: 1 });
+    obj.save()
+    .then(obj => new Parse.Query('Obj').get(obj.id))
+    .then(obj => {
+      expect(obj.get('val').createdAt).toEqual('a');
+      expect(obj.get('val').updatedAt).toEqual(1);
       done();
     });
   });
