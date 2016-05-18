@@ -1260,6 +1260,23 @@ describe('miscellaneous', function() {
     });
   });
 
+  fit('using beforeSave to fix up the type of a field works (regression test for #1816)', done => {
+    Parse.Cloud.beforeSave('Object', (request, response) => {
+      request.object.set('shouldBeString', 'string' + request.object.get('shouldBeString'));
+      request.object.save()
+      .then(response.success);
+    });
+    new Parse.Object('Object').save({shouldBeString: 7})
+    .then(() => new Parse.Object('Object').save({shouldBeString: 8}))
+    .then(() => new Parse.Query('Object').ascending('shouldBeString').find())
+    .then(([o1, o2]) => {
+      expect(o1.get('shouldBeString')).toEqual('string7');
+      expect(o2.get('shouldBeString')).toEqual('string8');
+      Parse.Cloud._removeHook('Triggers', 'beforeSave', 'Object');
+      done();
+    });
+  });
+
   it('dedupes an installation properly and returns updatedAt', (done) => {
     let headers = {
       'Content-Type': 'application/json',
